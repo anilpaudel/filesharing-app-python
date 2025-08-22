@@ -1,0 +1,2 @@
+# No external dependencies required - uses only Python built-in modules
+# This file is for future dependencies if needed
