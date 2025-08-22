@@ -6,6 +6,8 @@ import io
 import socket
 import threading
 import time
+import zipfile
+import tempfile
 from urllib.parse import parse_qs, urlparse
 
 PORT = 8303
@@ -80,23 +82,7 @@ class FileServerHandler(http.server.SimpleHTTPRequestHandler):
             if not self.wfile.closed:
                 self.send_error(500, f"Error serving file: {str(e)}")
 
-    def do_GET(self):
-        """Handle GET requests with streaming for files"""
-        parsed_path = urlparse(self.path)
-        path = urllib.parse.unquote(parsed_path.path)
-        
-        # Handle root path
-        if path == '/':
-            return self.list_directory(DIRECTORY)
-        
-        # Handle file requests
-        filepath = os.path.join(DIRECTORY, path.lstrip('/'))
-        if os.path.isfile(filepath):
-            return self.send_file_streaming(filepath)
-        elif os.path.isdir(filepath):
-            return self.list_directory(filepath)
-        else:
-            self.send_error(404, "File not found")
+
 
     def list_directory(self, path):
         """Generate a modern, organized file browser UI with file management features"""
@@ -475,48 +461,74 @@ class FileServerHandler(http.server.SimpleHTTPRequestHandler):
             html.append('<div class="file-grid">')
             
             for name in sorted_list:
-                fullname = os.path.join(path, name)
-                display_name = name
-                is_dir = os.path.isdir(fullname)
-                
-                # Get file info
-                try:
-                    if is_dir:
-                        size_str = "📁 Directory"
-                        icon = "📁"
-                        actions = f"""
-                            <button class="btn btn-primary btn-small" onclick="openFolder('{urllib.parse.quote(name)}/')">
-                                📂 Open
-                            </button>
-                        """
-                    else:
-                        size = os.path.getsize(fullname)
-                        size_str = f"📄 {self.format_file_size(size)}"
-                        icon = self.get_file_icon(name)
-                        actions = f"""
-                            <a href="{urllib.parse.quote(name)}" class="btn btn-primary btn-small">⬇️ Download</a>
-                            <button class="btn btn-warning btn-small" onclick="renameFile('{name}')">✏️ Rename</button>
-                            <button class="btn btn-danger btn-small" onclick="deleteFile('{name}')">🗑️ Delete</button>
-                        """
-                except:
-                    size_str = "N/A"
-                    icon = "📄"
-                    actions = ""
-                
-                html.append(f"""
-                    <div class="file-card">
-                        <span class="file-icon">{icon}</span>
-                        <div class="file-name">{display_name}</div>
-                        <div class="file-size">{size_str}</div>
-                        <div class="file-actions">
-                            {actions}
+                    fullname = os.path.join(path, name)
+                    display_name = name
+                    is_dir = os.path.isdir(fullname)
+                    
+                    # Get file info
+                    try:
+                        if is_dir:
+                            size_str = "📁 Directory"
+                            icon = "📁"
+                            actions = f"""
+                                <button class="btn btn-primary btn-small" onclick="openFolder('{urllib.parse.quote(name)}/')">
+                                    📂 Open
+                                </button>
+                                <button class="btn btn-warning btn-small" onclick="renameFile('{name}')">✏️ Rename</button>
+                                <button class="btn btn-danger btn-small" onclick="deleteFile('{name}')">🗑️ Delete</button>
+                            """
+                        else:
+                            size = os.path.getsize(fullname)
+                            size_str = f"📄 {self.format_file_size(size)}"
+                            icon = self.get_file_icon(name)
+                            actions = f"""
+                                <a href="{urllib.parse.quote(name)}" class="btn btn-primary btn-small">⬇️ Download</a>
+                                <button class="btn btn-warning btn-small" onclick="renameFile('{name}')">✏️ Rename</button>
+                                <button class="btn btn-danger btn-small" onclick="deleteFile('{name}')">🗑️ Delete</button>
+                            """
+                    except:
+                        size_str = "N/A"
+                        icon = "📄"
+                        actions = ""
+                    
+                    html.append(f"""
+                        <div class="file-card">
+                            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                                <input type="checkbox" class="file-checkbox" data-filename="{name}" style="transform: scale(1.2);">
+                                <span class="file-icon">{icon}</span>
+                            </div>
+                            <div class="file-name">{display_name}</div>
+                            <div class="file-size">{size_str}</div>
+                            <div class="file-actions">
+                                {actions}
+                            </div>
                         </div>
-                    </div>
-                """)
+                    """)
             
             html.append('</div>')
+            
+            # Add bulk actions section
+            html.append("""
+            <div style="margin-top: 20px; padding: 20px; background: #e3f2fd; border-radius: 10px; border: 1px solid #bbdefb;">
+                <h3 style="margin-bottom: 15px; color: #1976d2;">📦 Bulk Actions</h3>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="selectAll()">☑️ Select All</button>
+                    <button class="btn" onclick="deselectAll()">☐ Deselect All</button>
+                    <button class="btn btn-primary" onclick="downloadSelected()">📦 Download Selected as ZIP</button>
+                    <button class="btn btn-danger" onclick="deleteSelected()">🗑️ Delete Selected</button>
+                </div>
+            </div>
+            """)
 
         html.append("""
+                </div>
+                
+                <div class="section">
+                    <h2>📁 Create Folder</h2>
+                    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 20px;">
+                        <input type="text" id="folderName" placeholder="Enter folder name" style="flex: 1; padding: 12px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 1em;">
+                        <button class="btn btn-primary" onclick="createFolder()">📁 Create Folder</button>
+                    </div>
                 </div>
                 
                 <div class="section">
@@ -579,6 +591,108 @@ class FileServerHandler(http.server.SimpleHTTPRequestHandler):
         const progressFill = document.getElementById('progressFill');
         const progressText = document.getElementById('progressText');
         const status = document.getElementById('status');
+        
+        // Folder creation
+        async function createFolder() {
+            const folderName = document.getElementById('folderName').value.trim();
+            if (!folderName) {
+                showStatus('Please enter a folder name', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/create_folder', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `folder_name=${encodeURIComponent(folderName)}`
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    showStatus('Folder created successfully!', 'success');
+                    document.getElementById('folderName').value = '';
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    showStatus('Folder creation failed: ' + result.message, 'error');
+                }
+            } catch (error) {
+                showStatus('Folder creation failed: ' + error.message, 'error');
+            }
+        }
+        
+        // Bulk selection functions
+        function selectAll() {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            checkboxes.forEach(checkbox => checkbox.checked = true);
+        }
+        
+        function deselectAll() {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            checkboxes.forEach(checkbox => checkbox.checked = false);
+        }
+        
+        function getSelectedFiles() {
+            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            return Array.from(checkboxes).map(checkbox => checkbox.dataset.filename);
+        }
+        
+        async function downloadSelected() {
+            const selectedFiles = getSelectedFiles();
+            if (selectedFiles.length === 0) {
+                showStatus('Please select files to download', 'error');
+                return;
+            }
+            
+            const items = selectedFiles.join(',');
+            const url = `/download_zip?items=${encodeURIComponent(items)}`;
+            window.location.href = url;
+        }
+        
+        async function deleteSelected() {
+            const selectedFiles = getSelectedFiles();
+            if (selectedFiles.length === 0) {
+                showStatus('Please select files to delete', 'error');
+                return;
+            }
+            
+            if (!confirm(`Are you sure you want to delete ${selectedFiles.length} item(s)?`)) {
+                return;
+            }
+            
+            let successCount = 0;
+            let errorCount = 0;
+            
+            for (const filename of selectedFiles) {
+                try {
+                    const response = await fetch('/delete', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: `filename=${encodeURIComponent(filename)}`
+                    });
+                    
+                    const result = await response.json();
+                    if (result.status === 'success') {
+                        successCount++;
+                    } else {
+                        errorCount++;
+                    }
+                } catch (error) {
+                    errorCount++;
+                }
+            }
+            
+            if (errorCount === 0) {
+                showStatus(`Successfully deleted ${successCount} item(s)!`, 'success');
+            } else {
+                showStatus(`Deleted ${successCount} item(s), ${errorCount} failed`, 'error');
+            }
+            
+            setTimeout(() => location.reload(), 1500);
+        }
         
         // Drag and drop
         uploadArea.addEventListener('dragover', (e) => {
@@ -794,9 +908,33 @@ class FileServerHandler(http.server.SimpleHTTPRequestHandler):
             return self.handle_delete()
         elif self.path == '/rename':
             return self.handle_rename()
+        elif self.path == '/create_folder':
+            return self.handle_create_folder()
         
         # Fallback to old multipart handling
         return self.handle_multipart_upload()
+
+    def do_GET(self):
+        """Handle GET requests with streaming for files and zip downloads"""
+        parsed_path = urlparse(self.path)
+        path = urllib.parse.unquote(parsed_path.path)
+        
+        # Handle zip download
+        if path.startswith('/download_zip'):
+            return self.handle_zip_download(parsed_path.query)
+        
+        # Handle root path
+        if path == '/':
+            return self.list_directory(DIRECTORY)
+        
+        # Handle file requests
+        filepath = os.path.join(DIRECTORY, path.lstrip('/'))
+        if os.path.isfile(filepath):
+            return self.send_file_streaming(filepath)
+        elif os.path.isdir(filepath):
+            return self.list_directory(filepath)
+        else:
+            self.send_error(404, "File not found")
 
     def do_DELETE(self):
         """Handle DELETE requests for file deletion"""
@@ -940,6 +1078,107 @@ class FileServerHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(b'{"status": "error", "message": "File not found"}')
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(f'{{"status": "error", "message": "{str(e)}"}}'.encode())
+
+    def handle_create_folder(self):
+        """Handle folder creation"""
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode('utf-8')
+        data = urllib.parse.parse_qs(body)
+        
+        folder_name = data.get('folder_name', [''])[0]
+
+        if not folder_name:
+            self.send_response(400)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status": "error", "message": "Folder name is required"}')
+            return
+
+        try:
+            folder_path = os.path.join(DIRECTORY, folder_name)
+            
+            if os.path.exists(folder_path):
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"status": "error", "message": "Folder already exists"}')
+                return
+            
+            os.makedirs(folder_path, exist_ok=True)
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"status": "success", "message": "Folder created successfully"}')
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(f'{{"status": "error", "message": "{str(e)}"}}'.encode())
+
+    def handle_zip_download(self, query_string):
+        """Handle zip file creation and download"""
+        try:
+            # Parse query parameters
+            params = urllib.parse.parse_qs(query_string)
+            items = params.get('items', [''])[0].split(',') if params.get('items') else []
+            
+            if not items:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"status": "error", "message": "No items specified for download"}')
+                return
+
+            # Create temporary zip file
+            with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_zip:
+                with zipfile.ZipFile(temp_zip.name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for item in items:
+                        item = item.strip()
+                        if not item:
+                            continue
+                            
+                        item_path = os.path.join(DIRECTORY, item)
+                        if os.path.exists(item_path):
+                            if os.path.isfile(item_path):
+                                # Add single file
+                                zipf.write(item_path, item)
+                            elif os.path.isdir(item_path):
+                                # Add entire directory
+                                for root, dirs, files in os.walk(item_path):
+                                    for file in files:
+                                        file_path = os.path.join(root, file)
+                                        arc_name = os.path.relpath(file_path, DIRECTORY)
+                                        zipf.write(file_path, arc_name)
+
+            # Send the zip file
+            zip_size = os.path.getsize(temp_zip.name)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Disposition', 'attachment; filename="download.zip"')
+            self.send_header('Content-Length', str(zip_size))
+            self.end_headers()
+            
+            # Stream the zip file
+            with open(temp_zip.name, 'rb') as f:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+            
+            # Clean up temporary file
+            os.unlink(temp_zip.name)
+            
         except Exception as e:
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
